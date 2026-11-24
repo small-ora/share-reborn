@@ -70,7 +70,7 @@ jobs:
 
       - name: 构建 Release APK
         env:
-          KEYSTORE_PATH: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && 'keystore/release.jks' || '' }}
+          KEYSTORE_PATH: keystore/release.jks
           KEYSTORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
@@ -90,7 +90,7 @@ jobs:
           if [ -f keystore/release.jks ]; then
             CERTS="$("$BT/apksigner" verify --print-certs "$APK")"
             echo "$CERTS" | head -5
-            ACTUAL=$(echo "$CERTS" | grep -i "SHA-256" | head -1 | awk -F': ' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+            ACTUAL=$(echo "$CERTS" | grep -i "SHA-256" | head -1 | grep -oE '[0-9a-fA-F]{64}' | head -1 | tr 'A-Z' 'a-z')
             EXPECTED=$(tr -d ':' < .github/expected-cert-sha256.txt | tr 'A-Z' 'a-z')
             if [ "$ACTUAL" != "$EXPECTED" ]; then
               echo "❌ 签名证书与预期不一致（覆盖升级会失败）"
