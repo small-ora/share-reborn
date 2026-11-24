@@ -18,11 +18,17 @@ android {
         resourceConfigurations += listOf("zh", "en")
     }
 
+    // 签名材料来自环境变量（CI 里从 Secrets 注入）；路径相对仓库根目录解析
+    val keystoreFile = System.getenv("KEYSTORE_PATH")
+        ?.takeIf { it.isNotBlank() }
+        ?.let { rootProject.file(it) }
+        ?.takeIf { it.exists() }
+    println("[share-reborn] signing keystore = ${keystoreFile?.absolutePath ?: "NONE (unsigned build)"}")
+
     signingConfigs {
         create("release") {
-            val ksPath = System.getenv("KEYSTORE_PATH")
-            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
-                storeFile = file(ksPath)
+            if (keystoreFile != null) {
+                storeFile = keystoreFile
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
@@ -35,8 +41,7 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            val ksPath = System.getenv("KEYSTORE_PATH")
-            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+            if (keystoreFile != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
