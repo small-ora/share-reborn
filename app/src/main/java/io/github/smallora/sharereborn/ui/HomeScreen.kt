@@ -65,7 +65,9 @@ fun HomeScreen() {
                         steps.clear()
                         scope.launch {
                             try {
-                                GuestProbe.runAll { steps.add(it) }
+                                val result = GuestProbe.probeAll()
+                                steps.clear()
+                                steps.addAll(result)
                             } catch (t: Throwable) {
                                 steps.add(GuestProbe.Step("异常", false, t.toString()))
                             } finally {

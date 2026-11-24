@@ -1,6 +1,8 @@
 package io.github.smallora.sharereborn.data.guest
 
 import android.os.Build
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -34,8 +36,11 @@ object GuestProbe {
         if (subp.isNotEmpty()) append("SUBP=$subp")
     }.trim().removeSuffix(";")
 
-    suspend fun runAll(onStep: (Step) -> Unit) {
-        onStep(
+    suspend fun probeAll(): List<Step> = withContext(Dispatchers.IO) {
+        val steps = mutableListOf<Step>()
+        fun add(step: Step) = steps.add(step)
+
+        add(
             Step(
                 "运行环境",
                 true,
@@ -44,60 +49,57 @@ object GuestProbe {
         )
 
         // 1. 访客票据（genvisitor + incarnate）
-        val ticket = runCatching { fetchVisitorTicket() }
-        ticket.fold(
-            onSuccess = {
-                onStep(Step("① 访客票据", true, "已获取 SUB(${sub.take(16)}…) / SUBP(${subp.take(12)}…)"))
-            },
+        runCatching { fetchVisitorTicket() }.fold(
+            onSuccess = { add(Step("① 访客票据", true, "已获取 SUB(${sub.take(16)}…) / SUBP(${subp.take(12)}…)")) },
             onFailure = {
-                onStep(Step("① 访客票据", false, it.message ?: it.toString()))
-                return
+                add(Step("① 访客票据", false, it.message ?: it.toString()))
+                return@withContext steps
             },
         )
 
         // 2. 推荐流
         var firstId = ""
         var firstMblog = ""
+        var firstUid = ""
         val timeline = runCatching { fetchHotTimeline() }
         timeline.fold(
-            onSuccess = { (count, id, mblog, preview) ->
-                firstId = id
-                firstMblog = mblog
-                onStep(Step("② 推荐流 hottimeline", count > 0, "拿到 $count 条；首条预览：${preview.take(40)}"))
+            onSuccess = { t ->
+                firstId = t.id
+                firstMblog = t.mblogid
+                firstUid = t.uid
+                add(Step("② 推荐流 hottimeline", t.count > 0, "拿到 ${t.count} 条；首条预览：${t.preview.take(40)}"))
             },
-            onFailure = { onStep(Step("② 推荐流 hottimeline", false, it.message ?: it.toString())) },
+            onFailure = { add(Step("② 推荐流 hottimeline", false, it.message ?: it.toString())) },
         )
-        if (firstMblog.isEmpty()) return
+        if (firstMblog.isEmpty()) return@withContext steps
 
         // 3. 微博详情
-        val detail = runCatching { fetchStatusDetail(firstMblog) }
-        detail.fold(
+        runCatching { fetchStatusDetail(firstMblog) }.fold(
             onSuccess = { (text, comments) ->
-                onStep(Step("③ 微博详情 statuses/show", text.isNotEmpty(), "正文 ${text.length} 字，评论数 $comments"))
+                add(Step("③ 微博详情 statuses/show", text.isNotEmpty(), "正文 ${text.length} 字，评论数 $comments"))
             },
-            onFailure = { onStep(Step("③ 微博详情 statuses/show", false, it.message ?: it.toString())) },
+            onFailure = { add(Step("③ 微博详情 statuses/show", false, it.message ?: it.toString())) },
         )
 
         // 4. 评论列表
-        val comments = runCatching { fetchComments(firstId) }
-        comments.fold(
+        runCatching { fetchComments(firstId) }.fold(
             onSuccess = { (count, first) ->
-                onStep(Step("④ 评论 buildComments", count > 0, "拿到 $count 条；首条：${first.take(40)}"))
+                add(Step("④ 评论 buildComments", count > 0, "拿到 $count 条；首条：${first.take(40)}"))
             },
-            onFailure = { onStep(Step("④ 评论 buildComments", false, it.message ?: it.toString())) },
+            onFailure = { add(Step("④ 评论 buildComments", false, it.message ?: it.toString())) },
         )
 
-        // 5. 用户资料
-        val uid = runCatching { fetchFirstUid() }.getOrNull().orEmpty()
-        if (uid.isNotEmpty()) {
-            val profile = runCatching { fetchProfile(uid) }
-            profile.fold(
-                onSuccess = { name ->
-                    onStep(Step("⑤ 用户资料 profile/info", name.isNotEmpty(), "昵称：$name"))
-                },
-                onFailure = { onStep(Step("⑤ 用户资料 profile/info", false, it.message ?: it.toString())) },
+        // 5. 用户资料（复用第 2 步里的 uid，避免重复请求被限流）
+        if (firstUid.isNotEmpty()) {
+            runCatching { fetchProfile(firstUid) }.fold(
+                onSuccess = { name -> add(Step("⑤ 用户资料 profile/info", name.isNotEmpty(), "uid=$firstUid 昵称：$name")) },
+                onFailure = { add(Step("⑤ 用户资料 profile/info", false, it.message ?: it.toString())) },
             )
+        } else {
+            add(Step("⑤ 用户资料 profile/info", false, "未能从推荐流取到 uid"))
         }
+
+        steps
     }
 
     // ---------- 具体请求 ----------
@@ -130,7 +132,8 @@ object GuestProbe {
         if (arr.length() == 0) return Quad(0, "", "", "")
         val s = arr.getJSONObject(0)
         val text = s.optString("text_raw").ifEmpty { s.optString("text") }
-        return Quad(arr.length(), s.optString("idstr"), s.optString("mblogid"), text)
+        val uid = s.optJSONObject("user")?.optString("idstr").orEmpty()
+        return Quad(arr.length(), s.optString("idstr"), s.optString("mblogid"), text, uid)
     }
 
     private fun fetchStatusDetail(mblogid: String): Pair<String, Int> {
@@ -147,15 +150,6 @@ object GuestProbe {
         val arr = obj.optJSONArray("data") ?: return 0 to ""
         val first = if (arr.length() > 0) arr.getJSONObject(0).optString("text_raw") else ""
         return arr.length() to first
-    }
-
-    private fun fetchFirstUid(): String {
-        val json = get(
-            "https://weibo.com/ajax/feed/hottimeline?since_id=0&refresh=0&group_id=102803&containerid=102803&extparam=discover%7Cnew_feed"
-        )
-        val arr = JSONObject(json).optJSONArray("statuses") ?: return ""
-        if (arr.length() == 0) return ""
-        return arr.getJSONObject(0).optJSONObject("user")?.optString("idstr").orEmpty()
     }
 
     private fun fetchProfile(uid: String): String {
@@ -200,5 +194,11 @@ object GuestProbe {
         }
     }
 
-    private data class Quad(val count: Int, val id: String, val mblogid: String, val preview: String)
+    private data class Quad(
+        val count: Int,
+        val id: String,
+        val mblogid: String,
+        val preview: String,
+        val uid: String = "",
+    )
 }
